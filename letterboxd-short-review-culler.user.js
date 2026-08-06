@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Letterboxd Short Review Culler
 // @namespace    https://github.com/stalkerhumanoid
-// @version      2.0.0
+// @version      2.0.1
 // @author       @stalkerhumanoid
 // @license      MIT
 // @description  Hides short, low-effort reviews on Letterboxd (default: under 150 characters)
@@ -21,75 +21,47 @@
 (() => {
     'use strict';
 
-    const DEBUG = false;
-
     const DEFAULT_MINIMUM = 150;
-    const SETTING_KEY = 'characterMinimum';
+    const MINIMUM_KEY = 'characterMinimum';
+    const DEBUG_KEY = 'debug';
 
-    // Letterboxd redesigned its review markup; the .film-detail / .film-detail-content names are the
-    // pre-redesign ones, kept last in each list so any page still serving them keeps working.
+    // Current Letterboxd markup first, pre-redesign names last. The old names are kept because the
+    // /film/<slug>/reviews/ and member /films/reviews/ pages could not be verified, and may still
+    // serve them.
     //
-    // .body-text deliberately does not appear at document scope here. It survived the redesign but is
-    // no longer review-specific — the same class wraps the film synopsis and the promo banners — so it
-    // is only ever queried *within* an entry, where those cannot reach.
-    const REVIEW_SELECTOR = '.js-production-viewing, .production-viewing, .film-detail';
+    // Note what is absent: .body-text on its own. It survived the redesign but is no longer
+    // review-specific — the same class wraps the film synopsis and the promo banners — so it is only
+    // ever reached via an entry, where those cannot match.
+    const ENTRY_SELECTOR = '.js-production-viewing, .production-viewing, .film-detail';
     const WRAPPER_SELECTOR = '.js-listitem, .listitem';
-    // Tried in order, current markup first. Deliberately the elements that hold *only* the review text:
-    // the enclosing .js-review wrapper is not a fallback, because it also carries the "Like review /
-    // N likes" chrome and is present on rating-only entries that contain no review at all. If Letterboxd
-    // renames these, the script finds no body and culls nothing, which is the right way to fail.
-    const BODY_SELECTORS = ['.js-review-body', '.film-detail-content .body-text'];
-    const SPOILER_SELECTOR = '.js-spoiler-container, .contains-spoilers';
+    const BODY_SELECTOR = '.js-review-body, .film-detail-content .body-text';
 
     const HIDDEN_ATTR = 'data-lsrc-hidden';
 
-    let characterMinimum = DEFAULT_MINIMUM;
+    const hasStorage = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+
+    let characterMinimum = hasStorage ? GM_getValue(MINIMUM_KEY, DEFAULT_MINIMUM) : DEFAULT_MINIMUM;
+    if (!Number.isInteger(characterMinimum) || characterMinimum < 0) characterMinimum = DEFAULT_MINIMUM;
+
+    let debug = hasStorage ? GM_getValue(DEBUG_KEY, false) === true : false;
 
     function log(...args) {
-        if (DEBUG) console.log('[Short Review Culler]', ...args);
+        if (debug) console.log('[Short Review Culler]', ...args);
     }
 
-    // Managers disagree on the storage API: Violentmonkey and Tampermonkey ship the synchronous GM_*
-    // functions, Greasemonkey 4+ and Safari's Userscripts expose the promise-based GM.* namespace, and
-    // some expose neither. `typeof` guards rather than bare references, since an ungranted GM_getValue
-    // is an undeclared identifier. Awaiting covers both shapes; without either, the default stands.
-    async function readSetting(key, fallback) {
-        if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
-        if (typeof GM === 'object' && typeof GM?.getValue === 'function') return GM.getValue(key, fallback);
-        return fallback;
+    // No-op without storage, so the menu still works for the session on a manager that offers menu
+    // commands but not persistence.
+    function save(key, value) {
+        if (hasStorage) GM_setValue(key, value);
     }
 
-    async function writeSetting(key, value) {
-        if (typeof GM_setValue === 'function') return GM_setValue(key, value);
-        if (typeof GM === 'object' && typeof GM?.setValue === 'function') return GM.setValue(key, value);
-    }
-
-    function injectStyle() {
-        const style = document.createElement('style');
-        style.textContent = `[${HIDDEN_ATTR}] { display: none !important; }`;
-        (document.head || document.documentElement).append(style);
-    }
-
-    function findBody(entry) {
-        for (const selector of BODY_SELECTORS) {
-            const body = entry.querySelector(selector);
-            if (body) return body;
-        }
-        return null;
-    }
-
-    // Returns the review's length in characters, or null if this entry has no measurable body yet.
+    // Returns the review's length in characters, or null if this entry has no measurable body.
     function measure(entry) {
-        const body = findBody(entry);
+        const body = entry.querySelector(BODY_SELECTOR);
         if (!body) return null;
 
-        // The spoiler notice is Letterboxd's chrome, not the member's writing, so it must not count
-        // towards the length. Clone rather than mutate the live node. A review whose text is masked
-        // behind the notice measures empty once it is stripped, and so stays visible.
-        const copy = body.cloneNode(true);
-        copy.querySelectorAll(SPOILER_SELECTOR).forEach(notice => notice.remove());
-
-        const text = copy.textContent.replace(/\s+/g, ' ').trim();
+        // textContent carries the markup's own indentation and newlines, which would otherwise count.
+        const text = body.textContent.replace(/\s+/g, ' ').trim();
         if (!text) return null;
 
         // Count code points, not UTF-16 units, so emoji don't each count double.
@@ -101,93 +73,35 @@
         const length = measure(entry);
 
         // Fail open. An entry we cannot measure is one we do not understand — a rating-only diary
-        // entry, a spoiler-masked review, or markup still streaming in — and hiding it would be a
-        // guess. Leaving it unmarked lets a later pass reconsider it once its body arrives.
+        // entry, or markup that has changed under us — and hiding it would be a guess.
         if (length === null) return false;
 
-        // Hide the list wrapper rather than the entry itself; the wrapper carries the row's own
-        // spacing and separator, so hiding only the inner article would leave a visible gap.
-        const target = entry.closest(WRAPPER_SELECTOR) ?? entry;
+        // Hide the row wrapper rather than the entry itself: the wrapper carries the row's spacing and
+        // separator, so hiding only the inner article leaves a visible gap. Checking the direct parent
+        // rather than closest() keeps this tight — closest() walks up arbitrarily far, and could match
+        // a wrapper enclosing several entries and take them all with it.
+        const parent = entry.parentElement;
+        const target = parent?.matches(WRAPPER_SELECTOR) ? parent : entry;
         return target.toggleAttribute(HIDDEN_ATTR, length < characterMinimum);
     }
 
-    function entriesIn(root) {
-        if (typeof root.matches !== 'function') return [];
-        if (root.matches(REVIEW_SELECTOR)) return [root];
-
-        const descendants = root.querySelectorAll(REVIEW_SELECTOR);
-        if (descendants.length) return descendants;
-
-        // Nothing below: the node may instead be a piece of an entry arriving late — the parser adds
-        // a .film-detail empty and streams its body in afterwards, and Letterboxd's async sections do
-        // the same. Without walking back up, an entry first seen bodyless would never be reconsidered.
-        const ancestor = root.closest(REVIEW_SELECTOR);
-        return ancestor ? [ancestor] : [];
-    }
-
-    function cullWithin(root) {
+    // Every entry is reconsidered each time, so lowering the minimum brings reviews back without a
+    // reload. The page holds a dozen or so entries, which is far too few to be worth tracking
+    // incrementally. The found count is logged because it is the signal that matters if Letterboxd
+    // changes its markup again: entries=0 means the selectors need updating.
+    function sweep(reason) {
+        const entries = document.querySelectorAll(ENTRY_SELECTOR);
         let hidden = 0;
-        for (const entry of entriesIn(root)) {
+        for (const entry of entries) {
             if (cull(entry)) hidden++;
         }
-        return hidden;
-    }
-
-    // A full sweep reconsiders every entry, including ones already seen, so lowering the threshold
-    // brings hidden reviews back without a reload.
-    function sweep(reason) {
-        const hidden = cullWithin(document.documentElement);
-        log(`sweep (${reason}): ${hidden} hidden at minimum ${characterMinimum}`);
-    }
-
-    // Letterboxd keeps injecting review sections well after load (its /csi/ endpoints, pagination),
-    // which the old fixed 1s timeout could never keep up with. Batch the burst so a section drop costs
-    // one pass rather than one per mutation.
-    function observe() {
-        const pending = new Set();
-        let scheduled = false;
-
-        const flush = () => {
-            if (!scheduled) return;
-            scheduled = false;
-
-            const entries = new Set();
-            for (const node of pending) {
-                for (const entry of entriesIn(node)) entries.add(entry);
-            }
-            pending.clear();
-
-            let hidden = 0;
-            for (const entry of entries) {
-                if (cull(entry)) hidden++;
-            }
-            if (hidden) log(`hid ${hidden} review(s) from mutations`);
-        };
-
-        // requestAnimationFrame gives the pre-paint slot, so an entry is hidden before it can flash —
-        // but it does not fire in background tabs, and Letterboxd is a site people open in a dozen of
-        // them at once. The timer is the floor that guarantees the pass happens either way; whichever
-        // arrives first does the work and the other returns immediately.
-        const schedule = () => {
-            scheduled = true;
-            requestAnimationFrame(flush);
-            setTimeout(flush, 50);
-        };
-
-        new MutationObserver(mutations => {
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType === Node.ELEMENT_NODE) pending.add(node);
-                }
-            }
-            if (pending.size && !scheduled) schedule();
-        }).observe(document.documentElement, { childList: true, subtree: true });
+        log(`${reason}: ${hidden}/${entries.length} hidden, minimum ${characterMinimum}`);
     }
 
     function registerMenu() {
         if (typeof GM_registerMenuCommand !== 'function') return;
 
-        GM_registerMenuCommand('Set minimum review length…', async () => {
+        GM_registerMenuCommand('Set minimum review length…', () => {
             const answer = prompt('Hide reviews shorter than how many characters?', characterMinimum);
             if (answer === null) return;
 
@@ -198,25 +112,40 @@
             }
 
             characterMinimum = parsed;
-            await writeSetting(SETTING_KEY, parsed);
-            sweep('setting changed');
+            save(MINIMUM_KEY, parsed);
+            sweep('minimum changed');
+        });
+
+        GM_registerMenuCommand('Toggle debug logging', () => {
+            debug = !debug;
+            save(DEBUG_KEY, debug);
+            sweep('debug toggled');
+            alert(`Debug logging ${debug ? 'enabled' : 'disabled'}.`);
         });
     }
 
-    injectStyle();
-    observe();
+    const style = document.createElement('style');
+    style.textContent = `[${HIDDEN_ATTR}] { display: none !important; }`;
+    (document.head || document.documentElement).append(style);
+
+    // Letterboxd keeps injecting review sections after load (its /csi/ endpoints, pagination), which a
+    // fixed timeout could never keep up with.
+    //
+    // The sweep runs synchronously in the observer callback, and that placement is doing real work:
+    // MutationObserver callbacks are microtasks, so they run before the next render, and an entry is
+    // hidden before it can flash on screen. The throttle then stops a page full of unrelated DOM churn
+    // (lazy images, tooltips) from causing a sweep per batch, and the trailing sweep picks up whatever
+    // landed inside the throttle window.
+    let throttle = 0;
+    new MutationObserver(() => {
+        if (throttle) return;
+        sweep('mutation');
+        throttle = setTimeout(() => {
+            throttle = 0;
+            sweep('settled');
+        }, 100);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+
     registerMenu();
-
-    // Deliberately not awaited before observing: blocking the first pass on storage would let short
-    // reviews paint before being hidden. Start culling at the default, then correct course if the
-    // stored threshold differs.
-    readSetting(SETTING_KEY, DEFAULT_MINIMUM).then(stored => {
-        if (Number.isInteger(stored) && stored >= 0 && stored !== characterMinimum) {
-            characterMinimum = stored;
-            sweep('stored setting loaded');
-        }
-    }).catch(error => log('could not read stored minimum, using default:', error));
-
-    document.addEventListener('DOMContentLoaded', () => sweep('DOMContentLoaded'));
-    window.addEventListener('load', () => sweep('load'));
+    sweep('start');
 })();
