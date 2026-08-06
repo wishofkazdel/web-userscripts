@@ -26,9 +26,20 @@
     const DEFAULT_MINIMUM = 150;
     const SETTING_KEY = 'characterMinimum';
 
-    const REVIEW_SELECTOR = '.film-detail';
-    const BODY_SELECTOR = '.body-text';
-    const SPOILER_SELECTOR = '.contains-spoilers';
+    // Letterboxd redesigned its review markup; the .film-detail / .film-detail-content names are the
+    // pre-redesign ones, kept last in each list so any page still serving them keeps working.
+    //
+    // .body-text deliberately does not appear at document scope here. It survived the redesign but is
+    // no longer review-specific — the same class wraps the film synopsis and the promo banners — so it
+    // is only ever queried *within* an entry, where those cannot reach.
+    const REVIEW_SELECTOR = '.js-production-viewing, .production-viewing, .film-detail';
+    const WRAPPER_SELECTOR = '.js-listitem, .listitem';
+    // Tried in order, current markup first. Deliberately the elements that hold *only* the review text:
+    // the enclosing .js-review wrapper is not a fallback, because it also carries the "Like review /
+    // N likes" chrome and is present on rating-only entries that contain no review at all. If Letterboxd
+    // renames these, the script finds no body and culls nothing, which is the right way to fail.
+    const BODY_SELECTORS = ['.js-review-body', '.film-detail-content .body-text'];
+    const SPOILER_SELECTOR = '.js-spoiler-container, .contains-spoilers';
 
     const HIDDEN_ATTR = 'data-lsrc-hidden';
 
@@ -59,13 +70,22 @@
         (document.head || document.documentElement).append(style);
     }
 
+    function findBody(entry) {
+        for (const selector of BODY_SELECTORS) {
+            const body = entry.querySelector(selector);
+            if (body) return body;
+        }
+        return null;
+    }
+
     // Returns the review's length in characters, or null if this entry has no measurable body yet.
     function measure(entry) {
-        const body = entry.querySelector(BODY_SELECTOR);
+        const body = findBody(entry);
         if (!body) return null;
 
         // The spoiler notice is Letterboxd's chrome, not the member's writing, so it must not count
-        // towards the length. Clone rather than mutate the live node.
+        // towards the length. Clone rather than mutate the live node. A review whose text is masked
+        // behind the notice measures empty once it is stripped, and so stays visible.
         const copy = body.cloneNode(true);
         copy.querySelectorAll(SPOILER_SELECTOR).forEach(notice => notice.remove());
 
@@ -76,6 +96,7 @@
         return Array.from(text).length;
     }
 
+    // Returns true if the entry ended up hidden.
     function cull(entry) {
         const length = measure(entry);
 
@@ -84,8 +105,10 @@
         // guess. Leaving it unmarked lets a later pass reconsider it once its body arrives.
         if (length === null) return false;
 
-        entry.toggleAttribute(HIDDEN_ATTR, length < characterMinimum);
-        return true;
+        // Hide the list wrapper rather than the entry itself; the wrapper carries the row's own
+        // spacing and separator, so hiding only the inner article would leave a visible gap.
+        const target = entry.closest(WRAPPER_SELECTOR) ?? entry;
+        return target.toggleAttribute(HIDDEN_ATTR, length < characterMinimum);
     }
 
     function entriesIn(root) {
@@ -105,7 +128,7 @@
     function cullWithin(root) {
         let hidden = 0;
         for (const entry of entriesIn(root)) {
-            if (cull(entry) && entry.hasAttribute(HIDDEN_ATTR)) hidden++;
+            if (cull(entry)) hidden++;
         }
         return hidden;
     }
@@ -136,7 +159,7 @@
 
             let hidden = 0;
             for (const entry of entries) {
-                if (cull(entry) && entry.hasAttribute(HIDDEN_ATTR)) hidden++;
+                if (cull(entry)) hidden++;
             }
             if (hidden) log(`hid ${hidden} review(s) from mutations`);
         };
