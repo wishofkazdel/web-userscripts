@@ -26,20 +26,11 @@
     const MINIMUM_KEY = 'characterMinimum';
     const DEBUG_KEY = 'debug';
 
-    // Current Letterboxd markup first, pre-redesign names last. The old names are kept because the
-    // /film/<slug>/reviews/ and member /films/reviews/ pages could not be verified, and may still
-    // serve them.
-    //
-    // Note what is absent: .body-text on its own. It survived the redesign but is no longer
-    // review-specific — the same class wraps the film synopsis and the promo banners — so it is only
-    // ever reached via an entry, where those cannot match.
     const ENTRY_SELECTOR = '.js-production-viewing, .production-viewing, .film-detail';
     const WRAPPER_SELECTOR = '.js-listitem, .listitem';
     const BODY_SELECTOR = '.js-review-body, .film-detail-content .body-text';
 
-    // Reviews inside the popular/friends reviews block at the top of the film page are left alone —
-    // culling there would gut the page's main draw.
-    //
+    // Reviews inside the popular/friends reviews block at the top of the film page are left alone
     // Two selectors on purpose, because the two failure modes are complementary. The `js-popular*`
     // class is Letterboxd's own JS hook and is stable against the section moving around the page,
     // but could be renamed. `:nth-child(1)` survives a class rename, but only holds while the section
@@ -85,14 +76,12 @@
 
     // Returns true if the entry ended up hidden.
     function cull(entry) {
-        // Skip exempt sections before we even measure. closest() walks up from the entry, so this
-        // catches the entry wherever it sits inside the section, not just as a direct child.
+        // Skip exempt sections before we even measure.
         if (entry.closest(EXEMPT_SELECTOR)) return false;
 
         const length = measure(entry);
 
-        // Fail open. An entry we cannot measure is one we do not understand — a rating-only diary
-        // entry, or markup that has changed under us — and hiding it would be a guess.
+        // Fail open.
         if (length === null) return false;
 
         // Hide the row wrapper rather than the entry itself: the wrapper carries the row's spacing and
